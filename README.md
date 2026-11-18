@@ -21,4 +21,15 @@ GitHub and show as Verified; plain `git push` commits are unsigned.
 
 ## Workflows
 
-- `push-smoke.yml` — manual check that repops can push to a target repository.
+| Workflow | Trigger | Does |
+|---|---|---|
+| `drift.yml` | daily 09:17 KST, manual | Fork/upstream drift briefing per fork in [`drift/targets.json`](drift/targets.json), posted as issues here. See [`drift/README.md`](drift/README.md). |
+| `push-smoke.yml` | manual | Checks that repops can push to a target repository as the App. |
+
+## Secrets and variables
+
+| Name | Kind | Used by |
+|---|---|---|
+| `REPOPS_APP_PRIVATE_KEY` | secret | `push-smoke.yml` (App token) |
+| `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` | secret | `drift.yml` AI summary (optional; facts are posted without it) |
+| `OMNIROUTE_MODEL` | variable | `drift.yml` model or combo, default `auto` |

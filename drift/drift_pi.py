@@ -56,7 +56,7 @@ def provider_config(base, model):
     return {"providers": {"omniroute": {
         "baseUrl": api_base(base), "api": "openai-completions",
         "apiKey": "${OMNIROUTE_API_KEY}", "authHeader": True,
-        "headers": {"User-Agent": "boring-drift-briefing/1.0"},
+        "headers": {"User-Agent": "repops-drift-briefing/1.0"},
         "models": [{"id": model, "name": "OmniRoute briefing route",
                     "reasoning": False, "input": ["text"],
                     "contextWindow": 32768, "maxTokens": 4096,
@@ -162,7 +162,7 @@ def run_pi(command, env, cwd):
 
 def summarize(facts, base, key, model):
     repo = Path.cwd()
-    with tempfile.TemporaryDirectory(prefix="boring-pi-") as folder:
+    with tempfile.TemporaryDirectory(prefix="repops-pi-") as folder:
         root = Path(folder)
         workspace, config = root / "workspace", root / "agent"
         workspace.mkdir()

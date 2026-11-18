@@ -1,19 +1,30 @@
-# Daily upstream drift briefing
+# Fork drift briefing
 
-`daily_upstream_briefing.yml` compares the default branches of `alebeck/boring`
-and `ajchemist/boring` daily at **09:17 Asia/Seoul** (`17 0 * * *` UTC), or on
-manual dispatch. GitHub may delay scheduled runs. Scheduling requires the
-workflow on the default branch and enabled Actions; GitHub may disable public
-repository schedules after 60 days without repository activity.
+`.github/workflows/drift.yml` compares each fork in `targets.json` with its
+upstream (both default branches) daily at **09:17 Asia/Seoul** (`17 0 * * *`
+UTC), or on manual dispatch (optionally for one fork). GitHub may delay
+scheduled runs, and disables schedules in public repositories after 60 days
+without activity.
 
-Each Seoul date gets a new Korean issue, even when there are no changes. Reruns
-update that day's issue, including a closed issue, without reopening it.
-Issues must be enabled in the fork. The workflow uses `GITHUB_TOKEN` with
-`contents: read` and `issues: write`; no PAT is needed.
+Each fork gets one Korean issue per Seoul date **in this repository**, titled
+`[drift] <fork> <date>`, even when nothing changed. Reruns update that day's
+issue for that fork, including a closed one, without reopening it. Forks run as
+separate matrix jobs (two at a time); one failing fork does not stop the others.
+
+The workflow only needs `GITHUB_TOKEN` (`contents: read`, `issues: write` on
+this repository) and reads public repositories anonymously. Tracked
+repositories are never modified. Private forks would need a read token from
+the repops GitHub App; that is not wired up yet.
+
+## Adding a fork
+
+Append `{"fork": "owner/name", "upstream": "owner/name"}` to `targets.json`.
+The two must share history (one common ancestor). Run the workflow manually
+with that fork to check the first report.
 
 ## Pi coding agent and OmniRoute
 
-Configure these under Settings → Secrets and variables → Actions:
+Configure these in **this repository** under Settings → Secrets and variables → Actions:
 
 | Type | Name | Value |
 | --- | --- | --- |
@@ -32,7 +43,7 @@ Providers, their multiple API keys, routing policies, fallbacks and usage state
 remain managed on the OmniRoute server. `auto` delegates model selection there;
 `OMNIROUTE_MODEL` can select a named combo with streaming/tool-call support.
 The gateway must be reachable from GitHub-hosted runners. Pi sends the
-`boring-drift-briefing/1.0` User-Agent. Endpoint/key values and raw agent events
+`repops-drift-briefing/1.0` User-Agent. Endpoint/key values and raw agent events
 are not printed or included in the issue.
 
 Pi receives a disposable workspace containing `facts.json`, `upstream.patch`,
@@ -88,14 +99,15 @@ issue's AI section to confirm that inference succeeded.
 ## Local verification
 
 ```sh
-python3 -m unittest discover -s .github/scripts -p 'drift_test.py' -v
-bun test ./.github/scripts/drift_pi_guard.test.mjs
-actionlint .github/workflows/daily_upstream_briefing.yml
+python3 -m unittest discover -s drift -p 'drift_test.py' -v
+bun test ./drift/drift_pi_guard.test.mjs
+actionlint .github/workflows/drift.yml
 bun add --global @earendil-works/pi-coding-agent@0.87.1
-python3 .github/scripts/drift_briefing.py collect --output /tmp/boring-drift
-python3 .github/scripts/drift_pi.py /tmp/boring-drift
-python3 .github/scripts/drift_briefing.py render --output /tmp/boring-drift
+python3 drift/drift_briefing.py collect --fork ajchemist/boring --upstream alebeck/boring --output /tmp/drift
+python3 drift/drift_pi.py /tmp/drift
+python3 drift/drift_briefing.py render --output /tmp/drift
 ```
 
 `collect` requires authenticated `gh` and fetches the two public default branches.
-`render` writes `briefing.md` without posting. `publish` creates/updates the issue.
+`render` writes `briefing.md` without posting. `publish` creates/updates the issue
+in `$GITHUB_REPOSITORY`.

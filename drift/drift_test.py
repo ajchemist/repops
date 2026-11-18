@@ -74,17 +74,17 @@ class GitMeasurementTests(unittest.TestCase):
             data = drift.measure(upstream, self.base, self.now)
         self.assertEqual(data["behind"], 2)
         self.assertEqual(len(data["upstream_commits"]), 1)
-        self.assertIn("전체 2개", drift.commit_list(data["upstream_commits"], drift.UPSTREAM, 2))
+        self.assertIn("전체 2개", drift.commit_list(data["upstream_commits"], "owner/upstream", 2))
 
     def test_render_keeps_marker_and_bounds_github_body(self):
         data = drift.measure(self.base, self.base, self.now)
-        data.update(upstream_branch="main", fork_branch="main")
+        data.update(upstream_branch="main", fork_branch="main", fork="owner/fork", upstream="owner/upstream")
         for field in ("upstream_commits", "fork_commits", "upstream_recent", "fork_recent"):
             data[field] = [{"sha": self.base, "subject": "&가" * 200}] * 30
         data["overlap"] = ["&나" * 200] * 60
         body = drift.render(data, {"summary": "@everyone <!-- forged -->"})
         self.assertLessEqual(len(body.encode()), 60000)
-        self.assertTrue(body.startswith("<!-- boring-upstream-drift:"))
+        self.assertTrue(body.startswith("<!-- repops-drift:owner/fork:"))
         self.assertNotIn("@everyone", body)
         self.assertNotIn("<!-- forged", body)
 
@@ -105,27 +105,44 @@ class GitMeasurementTests(unittest.TestCase):
             self.assertEqual((root / "upstream.patch").read_text(), "No changes.\n")
 
 
+FACTS = {"date": "2026-09-24", "fork": "owner/fork"}
+
+
+@patch.dict(os.environ, {"GITHUB_REPOSITORY": "ajchemist/repops"})
 class PublishingTests(unittest.TestCase):
     def test_create_when_absent(self):
         with patch.object(drift, "api", side_effect=[[], {"html_url": "created"}]) as api:
-            self.assertEqual(drift.publish({"date": "2026-09-24"}, "body"), "created")
+            self.assertEqual(drift.publish(FACTS, "body"), "created")
         self.assertEqual(api.call_args.args[1], "POST")
         self.assertIn("state=all", api.call_args_list[0].args[0])
 
     def test_closed_issue_on_second_page_is_updated(self):
         existing = {"number": 42, "state": "closed",
-                    "body": "<!-- boring-upstream-drift:2026-09-24 -->\nold"}
+                    "body": "<!-- repops-drift:owner/fork:2026-09-24 -->\nold"}
         with patch.object(drift, "api", side_effect=[
             [{"body": "unrelated"}] * 100, [existing], {"html_url": "updated"}
         ]) as api:
-            self.assertEqual(drift.publish({"date": "2026-09-24"}, "new"), "updated")
-        self.assertEqual(api.call_args.args[:2], (f"repos/{drift.FORK}/issues/42", "PATCH"))
+            self.assertEqual(drift.publish(FACTS, "new"), "updated")
+        self.assertEqual(api.call_args.args[:2], ("repos/ajchemist/repops/issues/42", "PATCH"))
         self.assertNotIn("state", api.call_args.args[2])
 
     def test_pull_request_marker_does_not_match(self):
-        pr = {"body": "<!-- boring-upstream-drift:2026-09-24 -->", "pull_request": {}}
+        pr = {"body": "<!-- repops-drift:owner/fork:2026-09-24 -->", "pull_request": {}}
         with patch.object(drift, "api", side_effect=[[pr], {"html_url": "created"}]):
-            self.assertEqual(drift.publish({"date": "2026-09-24"}, "body"), "created")
+            self.assertEqual(drift.publish(FACTS, "body"), "created")
+
+    def test_other_forks_issue_is_not_reused(self):
+        other = {"number": 7, "body": "<!-- repops-drift:owner/other:2026-09-24 -->"}
+        with patch.object(drift, "api", side_effect=[[other], {"html_url": "created"}]) as api:
+            self.assertEqual(drift.publish(FACTS, "body"), "created")
+        self.assertEqual(api.call_args.args[:2], ("repos/ajchemist/repops/issues", "POST"))
+        self.assertIn("owner/fork", api.call_args.args[2]["title"])
+
+    def test_repository_names_are_validated(self):
+        self.assertEqual(drift.repo_name("alebeck/boring"), "alebeck/boring")
+        for bad in ("boring", "a/b/c", "a/../b", "a/b;rm", "-x/y "):
+            with self.assertRaises(Exception):
+                drift.repo_name(bad)
 
     def test_untrusted_titles_are_escaped(self):
         safe = drift.safe("@everyone <script> [click](bad)\nnext")
@@ -317,7 +334,7 @@ class PiRuntimeTests(unittest.TestCase):
             self.assertEqual(len(requests), 2)
             headers = {key.lower(): value for key, value in requests[0][0].items()}
             self.assertEqual(headers["authorization"], "Bearer test-key")
-            self.assertEqual(headers["user-agent"], "boring-drift-briefing/1.0")
+            self.assertEqual(headers["user-agent"], "repops-drift-briefing/1.0")
             self.assertTrue(requests[0][1]["stream"])
             self.assertTrue(all(tool["type"] == "function" for tool in requests[0][1]["tools"]))
         finally:

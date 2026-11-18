@@ -1,4 +1,5 @@
-"""Read Git history and publish one Korean drift briefing per Seoul date."""
+"""Compare a fork with its upstream and publish one Korean drift briefing per
+fork and Seoul date as an issue in the repository running this workflow."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -11,9 +12,22 @@ import subprocess
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-FORK = "ajchemist/boring"
-UPSTREAM = "alebeck/boring"
 LIMIT = 30
+REPO_NAME = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+
+
+def issue_repo():
+    return os.environ.get("GITHUB_REPOSITORY", "ajchemist/repops")
+
+
+def repo_name(value):
+    if not REPO_NAME.fullmatch(value) or ".." in value:
+        raise argparse.ArgumentTypeError(f"invalid repository {value!r}")
+    return value
+
+
+def marker(data):
+    return f"<!-- repops-drift:{data['fork']}:{data['date']} -->"
 
 
 def run(*args, input=None):
@@ -121,6 +135,7 @@ def routing_report(ai):
 
 
 def render(data, ai):
+    fork, upstream = data["fork"], data["upstream"]
     ahead, behind = data["ahead"], data["behind"]
     if ahead and behind:
         status = "양쪽에 고유 커밋이 있어 분기된 상태입니다. upstream 반영 여부를 검토하세요."
@@ -140,10 +155,10 @@ def render(data, ai):
         calls = ", ".join(f"{safe(tool)} {count}회" for tool, count in ai.get("tool_calls", {}).items())
         ai_text += f"\n\n하네스: {safe(ai['harness'])} · 확인된 도구 실행: {calls or '없음'}"
     sections = [
-        f"<!-- boring-upstream-drift:{data['date']} -->",
-        f"# Upstream / fork 드리프트 — {data['date']} (KST)",
+        marker(data),
+        f"# {data['fork']} drift — {data['date']} (KST)",
         f"기준 시각: {data['generated_at']} · 비교 대상: "
-        f"`{UPSTREAM}:{safe(data['upstream_branch'])}` ↔ `{FORK}:{safe(data['fork_branch'])}`",
+        f"`{upstream}:{safe(data['upstream_branch'])}` ↔ `{fork}:{safe(data['fork_branch'])}`",
         "## 상태\n\n" + status,
         "| 항목 | 수치 |\n| --- | ---: |\n"
         f"| fork에 없는 upstream 커밋 (behind) | {behind} |\n"
@@ -159,22 +174,22 @@ def render(data, ai):
         "## AI 검토 메모\n\n" + ai_text +
         "\n\n_AI 해석은 참고용입니다. 위 수치는 Git으로 직접 계산했습니다._",
         "## fork에 없는 upstream 커밋\n\n" +
-        commit_list(data["upstream_commits"], UPSTREAM, behind),
-        "## fork 전용 커밋\n\n" + commit_list(data["fork_commits"], FORK, ahead),
+        commit_list(data["upstream_commits"], upstream, behind),
+        "## fork 전용 커밋\n\n" + commit_list(data["fork_commits"], fork, ahead),
         "## 최근 24시간 upstream 활동\n\n" +
-        commit_list(data["upstream_recent"], UPSTREAM, data["upstream_recent_count"]),
+        commit_list(data["upstream_recent"], upstream, data["upstream_recent_count"]),
         "## 최근 24시간 fork 활동\n\n" +
-        commit_list(data["fork_recent"], FORK, data["fork_recent_count"]),
+        commit_list(data["fork_recent"], fork, data["fork_recent_count"]),
         "## 양쪽에서 변경한 파일\n\n" + overlap +
         "\n\n공통 조상 대비 각 tip의 변경 경로 교집합입니다(최대 60개 표시). "
         "충돌 가능성을 살펴볼 후보이며 실제 merge 충돌 판정은 아닙니다.",
         "## 비교 근거\n\n"
-        f"- [upstream tip](https://github.com/{UPSTREAM}/commit/{data['upstream_sha']})\n"
-        f"- [fork tip](https://github.com/{FORK}/commit/{data['fork_sha']})\n"
+        f"- [upstream tip](https://github.com/{upstream}/commit/{data['upstream_sha']})\n"
+        f"- [fork tip](https://github.com/{fork}/commit/{data['fork_sha']})\n"
         f"- 공통 조상: `{data['base']}`\n"
-        f"- [upstream → fork 비교](https://github.com/{FORK}/compare/"
+        f"- [upstream → fork 비교](https://github.com/{fork}/compare/"
         f"{data['upstream_sha']}...{data['fork_sha']})\n"
-        f"- [fork → upstream 비교](https://github.com/{UPSTREAM}/compare/"
+        f"- [fork → upstream 비교](https://github.com/{upstream}/compare/"
         f"{data['fork_sha']}...{data['upstream_sha']})",
     ]
     if data.get("run_url"):
@@ -187,44 +202,49 @@ def render(data, ai):
 
 
 def publish(data, body):
-    title = f"[Upstream drift] {data['date']}"
-    marker = f"<!-- boring-upstream-drift:{data['date']} -->"
+    title = f"[drift] {data['fork']} {data['date']}"
+    tag = marker(data)
+    repo = issue_repo()
     # List, not search: newly created issues are immediately visible; include closed issues.
     midnight = datetime.fromisoformat(data["date"]).replace(tzinfo=ZoneInfo("Asia/Seoul"))
     since = quote(midnight.astimezone(timezone.utc).isoformat(), safe="")
     page = 1
     while True:
-        issues = api(f"repos/{FORK}/issues?state=all&since={since}&per_page=100&page={page}")
+        issues = api(f"repos/{repo}/issues?state=all&since={since}&per_page=100&page={page}")
         for issue in issues:
-            if "pull_request" not in issue and (issue.get("body") or "").startswith(marker):
-                updated = api(f"repos/{FORK}/issues/{issue['number']}", "PATCH",
+            if "pull_request" not in issue and (issue.get("body") or "").startswith(tag):
+                updated = api(f"repos/{repo}/issues/{issue['number']}", "PATCH",
                               {"title": title, "body": body})
                 return updated["html_url"]
         if len(issues) < 100:
             break
         page += 1
-    return api(f"repos/{FORK}/issues", "POST", {"title": title, "body": body})["html_url"]
+    return api(f"repos/{repo}/issues", "POST", {"title": title, "body": body})["html_url"]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["collect", "publish", "render"])
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--fork", type=repo_name, help="owner/name of the fork (collect)")
+    parser.add_argument("--upstream", type=repo_name, help="owner/name of its upstream (collect)")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     if args.command == "collect":
+        if not (args.fork and args.upstream):
+            parser.error("collect requires --fork and --upstream")
         branches = {}
         tips = {}
-        for label, repo in (("fork", FORK), ("upstream", UPSTREAM)):
+        for label, repo in (("fork", args.fork), ("upstream", args.upstream)):
             branch = api(f"repos/{repo}")["default_branch"]
             git("fetch", "--no-tags", f"https://github.com/{repo}.git",
                 f"+refs/heads/{branch}:refs/drift/{label}")
             tips[label] = git("rev-parse", f"refs/drift/{label}")
             branches[f"{label}_branch"] = branch
         data = measure(tips["upstream"], tips["fork"], datetime.now(timezone.utc))
-        data.update(branches)
+        data.update(branches, fork=args.fork, upstream=args.upstream)
         if os.environ.get("GITHUB_RUN_ID"):
-            data["run_url"] = f"https://github.com/{FORK}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+            data["run_url"] = f"https://github.com/{issue_repo()}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
         (args.output / "facts.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
         print(f"Collected: ahead={data['ahead']}, behind={data['behind']}")
         return

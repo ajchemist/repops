@@ -1,0 +1,120 @@
+name: Fork drift briefing
+
+# Compares every fork listed in drift/targets.json with its upstream and posts
+# one Korean briefing issue per fork per Seoul date in this repository.
+
+on:
+  schedule:
+    # 09:17 Asia/Seoul. GitHub schedules can run later under load.
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+    inputs:
+      fork:
+        description: Only this fork (owner/name); empty runs every target
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'drift/**'
+      - '.github/workflows/drift.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - run: bun add --global @earendil-works/pi-coding-agent@0.87.1
+      - run: python3 -m unittest discover -s drift -p 'drift_test.py' -v
+      - run: bun test ./drift/drift_pi_guard.test.mjs
+
+  plan:
+    if: github.event_name != 'push'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      targets: ${{ steps.plan.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          ONLY: ${{ inputs.fork }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          name = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+          targets = json.load(open("drift/targets.json"))
+          for t in targets:
+              if set(t) != {"fork", "upstream"} or not all(name.fullmatch(t[k]) for k in t):
+                  raise SystemExit(f"invalid target: {t!r}")
+          only = os.environ.get("ONLY", "").strip()
+          if only:
+              targets = [t for t in targets if t["fork"] == only]
+              if not targets:
+                  raise SystemExit(f"{only} is not listed in drift/targets.json")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"targets={json.dumps(targets)}\n")
+          print(json.dumps(targets, indent=2))
+          PY
+
+  briefing:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    name: briefing (${{ matrix.target.fork }})
+    concurrency:
+      group: drift-${{ matrix.target.fork }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    env:
+      FORK: ${{ matrix.target.fork }}
+      UPSTREAM: ${{ matrix.target.upstream }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Measure upstream and fork drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 drift/drift_briefing.py collect --fork "$FORK" --upstream "$UPSTREAM" --output "$RUNNER_TEMP/drift"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install Pi coding agent
+        run: bun add --global @earendil-works/pi-coding-agent@0.87.1
+
+      # No GitHub token in this step: the agent reads untrusted upstream code.
+      - name: Inspect drift with Pi coding agent through OmniRoute
+        env:
+          OMNIROUTE_BASE_URL: ${{ secrets.OMNIROUTE_BASE_URL }}
+          OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
+          OMNIROUTE_MODEL: ${{ vars.OMNIROUTE_MODEL }}
+        run: python3 drift/drift_pi.py "$RUNNER_TEMP/drift"
+
+      - name: Publish today's issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 drift/drift_briefing.py publish --output "$RUNNER_TEMP/drift"
