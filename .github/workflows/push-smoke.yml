@@ -1,7 +1,8 @@
 name: Cross-repo push smoke test
 
 # Checks that repops can commit to another repository as the repops GitHub App,
-# both with plain `git push` and with a GitHub-signed API commit, then cleans up.
+# both with plain `git push` and with a GitHub-signed API commit, then removes
+# the test branch. The target must already have a default branch.
 
 on:
   workflow_dispatch:
@@ -14,7 +15,7 @@ on:
 permissions: {}
 
 env:
-  # GitHub App ID is not a secret; set during bootstrap
+  # GitHub App ID is not a secret
   REPOPS_APP_ID: "5817064"
 
 jobs:
@@ -32,9 +33,8 @@ jobs:
             *) echo "::error::target must be owned by ${GITHUB_REPOSITORY_OWNER}"; exit 1 ;;
           esac
 
-      # TODO: pin to a commit SHA once the version is confirmed.
       - id: app
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ env.REPOPS_APP_ID }}
           private-key: ${{ secrets.REPOPS_APP_PRIVATE_KEY }}
@@ -42,21 +42,31 @@ jobs:
           # Token is scoped to the target repository only
           repositories: ${{ steps.target.outputs.name }}
 
-      - name: Resolve bot identity
+      - name: Check target and resolve bot identity
         id: who
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SLUG: ${{ steps.app.outputs.app-slug }}
         run: |
+          # An empty repository would turn the test branch into its default branch.
+          if ! base=$(gh api "repos/${TARGET}/commits?per_page=1" --jq '.[0].sha' 2>/dev/null) || [ -z "$base" ]; then
+            echo "::error::${TARGET} has no commits; push an initial commit first"
+            exit 1
+          fi
+          default=$(gh api "repos/${TARGET}" --jq .default_branch)
           id=$(gh api "/users/${SLUG}%5Bbot%5D" --jq .id)
-          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
-          echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          {
+            echo "default=${default}"
+            echo "name=${SLUG}[bot]"
+            echo "email=${id}+${SLUG}[bot]@users.noreply.github.com"
+          } >> "$GITHUB_OUTPUT"
 
       - name: 1) git clone, commit, push
         env:
           TOKEN: ${{ steps.app.outputs.token }}
+          DEFAULT: ${{ steps.who.outputs.default }}
         run: |
-          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${TARGET}.git" target
+          git clone --depth 1 --branch "$DEFAULT" "https://x-access-token:${TOKEN}@github.com/${TARGET}.git" target
           cd target
           git config user.name  "${{ steps.who.outputs.name }}"
           git config user.email "${{ steps.who.outputs.email }}"
@@ -81,22 +91,31 @@ jobs:
                 fileChanges:{additions:[{path:".repops-smoke", contents:$content}]}
               }) { commit { oid url } }
             }' -f repo="$TARGET" -f branch="$BRANCH" -f head="$BASE_SHA" -f content="$content" \
-            --jq '.data.createCommitOnBranch.commit' | tee api_commit.json
+            --jq '.data.createCommitOnBranch.commit'
 
       - name: Report
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
-          {
+          report=$({
             echo "### Cross-repo push to \`$TARGET\`"
-            echo "| commit | author | verified |"
-            echo "|---|---|---|"
+            echo "| commit | message | author | committer | verified |"
+            echo "|---|---|---|---|---|"
             gh api "repos/${TARGET}/commits?sha=${BRANCH}&per_page=2" \
-              --jq '.[] | "| \(.sha[0:7]) \(.commit.message) | \(.commit.author.name) | \(.commit.verification.verified) (\(.commit.verification.reason)) |"'
-          } >> "$GITHUB_STEP_SUMMARY"
+              --jq '.[] | "| \(.sha[0:7]) | \(.commit.message) | \(.commit.author.name) | \(.commit.committer.name) | \(.commit.verification.verified) (\(.commit.verification.reason)) |"'
+          })
+          echo "$report"
+          echo "$report" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up test branch
-        if: always()
+        if: always() && steps.who.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: gh api -X DELETE "repos/${TARGET}/git/refs/heads/${BRANCH}" || true
+          DEFAULT: ${{ steps.who.outputs.default }}
+        run: |
+          # Never touch the default branch; a missing test branch is fine.
+          if [ "$BRANCH" = "$DEFAULT" ]; then exit 1; fi
+          if gh api "repos/${TARGET}/branches/${BRANCH}" --silent 2>/dev/null; then
+            gh api -X DELETE "repos/${TARGET}/git/refs/heads/${BRANCH}"
+            echo "Deleted ${BRANCH}"
+          fi
