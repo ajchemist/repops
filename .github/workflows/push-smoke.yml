@@ -1,0 +1,102 @@
+name: Cross-repo push smoke test
+
+# Checks that repops can commit to another repository as the repops GitHub App,
+# both with plain `git push` and with a GitHub-signed API commit, then cleans up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Repository to test against (owner/name)
+        default: ajchemist/github-playground
+        required: true
+
+permissions: {}
+
+env:
+  # GitHub App ID is not a secret; set during bootstrap
+  REPOPS_APP_ID: "5817064"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      TARGET: ${{ inputs.target }}
+      BRANCH: repops/smoke-${{ github.run_id }}
+    steps:
+      - id: target
+        run: |
+          case "$TARGET" in
+            "${GITHUB_REPOSITORY_OWNER}"/*) echo "name=${TARGET#*/}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::target must be owned by ${GITHUB_REPOSITORY_OWNER}"; exit 1 ;;
+          esac
+
+      # TODO: pin to a commit SHA once the version is confirmed.
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ env.REPOPS_APP_ID }}
+          private-key: ${{ secrets.REPOPS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Token is scoped to the target repository only
+          repositories: ${{ steps.target.outputs.name }}
+
+      - name: Resolve bot identity
+        id: who
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          id=$(gh api "/users/${SLUG}%5Bbot%5D" --jq .id)
+          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: 1) git clone, commit, push
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${TARGET}.git" target
+          cd target
+          git config user.name  "${{ steps.who.outputs.name }}"
+          git config user.email "${{ steps.who.outputs.email }}"
+          git switch -c "$BRANCH"
+          echo "repops smoke ${{ github.run_id }} (git)" > .repops-smoke
+          git add .repops-smoke
+          git commit -m "repops smoke test (git push)"
+          git push origin "$BRANCH"
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: 2) API commit (signed by GitHub)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          content=$(printf 'repops smoke %s (api)\n' "${{ github.run_id }}" | base64 -w0)
+          gh api graphql -f query='
+            mutation($repo:String!, $branch:String!, $head:GitObjectID!, $content:Base64String!) {
+              createCommitOnBranch(input:{
+                branch:{repositoryNameWithOwner:$repo, branchName:$branch},
+                expectedHeadOid:$head,
+                message:{headline:"repops smoke test (API commit)"},
+                fileChanges:{additions:[{path:".repops-smoke", contents:$content}]}
+              }) { commit { oid url } }
+            }' -f repo="$TARGET" -f branch="$BRANCH" -f head="$BASE_SHA" -f content="$content" \
+            --jq '.data.createCommitOnBranch.commit' | tee api_commit.json
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          {
+            echo "### Cross-repo push to \`$TARGET\`"
+            echo "| commit | author | verified |"
+            echo "|---|---|---|"
+            gh api "repos/${TARGET}/commits?sha=${BRANCH}&per_page=2" \
+              --jq '.[] | "| \(.sha[0:7]) \(.commit.message) | \(.commit.author.name) | \(.commit.verification.verified) (\(.commit.verification.reason)) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up test branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh api -X DELETE "repos/${TARGET}/git/refs/heads/${BRANCH}" || true
